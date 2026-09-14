@@ -15,7 +15,10 @@ class MyOnPolicyRunner(OnPolicyRunner):
         super().save(path, infos)
         if self.logger_type in ["wandb"]:
             policy_path = path.split("model")[0]
-            filename = policy_path.split("/")[-2] + ".onnx"
+            # NOTE: was `policy_path.split("/")[-2]`, which assumes Unix-style forward-slash
+            # paths; on Windows `policy_path` uses backslashes and that split is a no-op, so
+            # [-2] raised IndexError. os.path.basename(normpath(...)) works on both.
+            filename = os.path.basename(os.path.normpath(policy_path)) + ".onnx"
             export_policy_as_onnx(self.alg.policy, normalizer=self.obs_normalizer, path=policy_path, filename=filename)
             attach_onnx_metadata(self.env.unwrapped, wandb.run.name, path=policy_path, filename=filename)
             wandb.save(policy_path + filename, base_path=os.path.dirname(policy_path))
@@ -33,7 +36,8 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         super().save(path, infos)
         if self.logger_type in ["wandb"]:
             policy_path = path.split("model")[0]
-            filename = policy_path.split("/")[-2] + ".onnx"
+            # see MyOnPolicyRunner.save() above for why this isn't `.split("/")[-2]`
+            filename = os.path.basename(os.path.normpath(policy_path)) + ".onnx"
             export_motion_policy_as_onnx(
                 self.env.unwrapped, self.alg.policy, normalizer=self.obs_normalizer, path=policy_path, filename=filename
             )
