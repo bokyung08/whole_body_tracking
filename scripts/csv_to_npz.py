@@ -10,7 +10,13 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import os
+import sys
 import numpy as np
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 from isaaclab.app import AppLauncher
 
@@ -241,74 +247,107 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
         "body_ang_vel_w": [],
     }
     file_saved = False
+    progress = None
+    if tqdm is not None:
+        progress = tqdm(
+            total=motion.output_frames,
+            desc=f"CSV->NPZ {args_cli.output_name}",
+            unit="frame",
+            dynamic_ncols=True,
+            mininterval=1.0,
+        )
+    else:
+        print("[WARN]: tqdm is not installed; install it with `pip install tqdm` for a frame progress bar.")
     # --------------------------------------------------------------------------
 
     # Simulation loop
-    while simulation_app.is_running():
-        (
+    try:
+        while simulation_app.is_running():
             (
-                motion_base_pos,
-                motion_base_rot,
-                motion_base_lin_vel,
-                motion_base_ang_vel,
-                motion_dof_pos,
-                motion_dof_vel,
-            ),
-            reset_flag,
-        ) = motion.get_next_state()
+                (
+                    motion_base_pos,
+                    motion_base_rot,
+                    motion_base_lin_vel,
+                    motion_base_ang_vel,
+                    motion_dof_pos,
+                    motion_dof_vel,
+                ),
+                reset_flag,
+            ) = motion.get_next_state()
 
-        # set root state
-        root_states = robot.data.default_root_state.clone()
-        root_states[:, :3] = motion_base_pos
-        root_states[:, :2] += scene.env_origins[:, :2]
-        root_states[:, 3:7] = motion_base_rot
-        root_states[:, 7:10] = motion_base_lin_vel
-        root_states[:, 10:] = motion_base_ang_vel
-        robot.write_root_state_to_sim(root_states)
+            # set root state
+            root_states = robot.data.default_root_state.clone()
+            root_states[:, :3] = motion_base_pos
+            root_states[:, :2] += scene.env_origins[:, :2]
+            root_states[:, 3:7] = motion_base_rot
+            root_states[:, 7:10] = motion_base_lin_vel
+            root_states[:, 10:] = motion_base_ang_vel
+            robot.write_root_state_to_sim(root_states)
 
-        # set joint state
-        joint_pos = robot.data.default_joint_pos.clone()
-        joint_vel = robot.data.default_joint_vel.clone()
-        joint_pos[:, robot_joint_indexes] = motion_dof_pos
-        joint_vel[:, robot_joint_indexes] = motion_dof_vel
-        robot.write_joint_state_to_sim(joint_pos, joint_vel)
-        sim.render()  # We don't want physic (sim.step())
-        scene.update(sim.get_physics_dt())
+            # set joint state
+            joint_pos = robot.data.default_joint_pos.clone()
+            joint_vel = robot.data.default_joint_vel.clone()
+            joint_pos[:, robot_joint_indexes] = motion_dof_pos
+            joint_vel[:, robot_joint_indexes] = motion_dof_vel
+            robot.write_joint_state_to_sim(joint_pos, joint_vel)
+            sim.render()  # We don't want physic (sim.step())
+            scene.update(sim.get_physics_dt())
 
-        pos_lookat = root_states[0, :3].cpu().numpy()
-        sim.set_camera_view(pos_lookat + np.array([2.0, 2.0, 0.5]), pos_lookat)
+            pos_lookat = root_states[0, :3].cpu().numpy()
+            sim.set_camera_view(pos_lookat + np.array([2.0, 2.0, 0.5]), pos_lookat)
 
-        if not file_saved:
-            log["joint_pos"].append(robot.data.joint_pos[0, :].cpu().numpy().copy())
-            log["joint_vel"].append(robot.data.joint_vel[0, :].cpu().numpy().copy())
-            log["body_pos_w"].append(robot.data.body_pos_w[0, :].cpu().numpy().copy())
-            log["body_quat_w"].append(robot.data.body_quat_w[0, :].cpu().numpy().copy())
-            log["body_lin_vel_w"].append(robot.data.body_lin_vel_w[0, :].cpu().numpy().copy())
-            log["body_ang_vel_w"].append(robot.data.body_ang_vel_w[0, :].cpu().numpy().copy())
+            if not file_saved:
+                log["joint_pos"].append(robot.data.joint_pos[0, :].cpu().numpy().copy())
+                log["joint_vel"].append(robot.data.joint_vel[0, :].cpu().numpy().copy())
+                log["body_pos_w"].append(robot.data.body_pos_w[0, :].cpu().numpy().copy())
+                log["body_quat_w"].append(robot.data.body_quat_w[0, :].cpu().numpy().copy())
+                log["body_lin_vel_w"].append(robot.data.body_lin_vel_w[0, :].cpu().numpy().copy())
+                log["body_ang_vel_w"].append(robot.data.body_ang_vel_w[0, :].cpu().numpy().copy())
+                if progress is not None:
+                    progress.update(1)
 
-        if reset_flag and not file_saved:
-            file_saved = True
-            for k in (
-                "joint_pos",
-                "joint_vel",
-                "body_pos_w",
-                "body_quat_w",
-                "body_lin_vel_w",
-                "body_ang_vel_w",
-            ):
-                log[k] = np.stack(log[k], axis=0)
+            if reset_flag and not file_saved:
+                file_saved = True
+                if progress is not None:
+                    progress.n = motion.output_frames
+                    progress.refresh()
+                for k in (
+                    "joint_pos",
+                    "joint_vel",
+                    "body_pos_w",
+                    "body_quat_w",
+                    "body_lin_vel_w",
+                    "body_ang_vel_w",
+                ):
+                    log[k] = np.stack(log[k], axis=0)
 
-            np.savez("/tmp/motion.npz", **log)
+                np.savez("/tmp/motion.npz", **log)
 
-            import wandb
+                # NOTE: run.link_artifact() to the WandB registry reliably hangs forever on this
+                # machine/account (confirmed: the artifact IS created server-side, but the client
+                # never gets a response). Our A/B/C training reads motions from local npz files via
+                # --motion_dir, not from the WandB registry, so this upload isn't actually needed.
+                # Skip it by default; set SKIP_WANDB_UPLOAD=0 to re-enable if this gets fixed.
+                if os.environ.get("SKIP_WANDB_UPLOAD", "1") != "1":
+                    import wandb
 
-            COLLECTION = args_cli.output_name
-            run = wandb.init(project="csv_to_npz", name=COLLECTION)
-            print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
-            REGISTRY = "motions"
-            logged_artifact = run.log_artifact(artifact_or_path="/tmp/motion.npz", name=COLLECTION, type=REGISTRY)
-            run.link_artifact(artifact=logged_artifact, target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}")
-            print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
+                    COLLECTION = args_cli.output_name
+                    run = wandb.init(project="csv_to_npz", name=COLLECTION)
+                    print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
+                    REGISTRY = "motions"
+                    logged_artifact = run.log_artifact(artifact_or_path="/tmp/motion.npz", name=COLLECTION, type=REGISTRY)
+                    run.link_artifact(artifact=logged_artifact, target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}")
+                    print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
+                else:
+                    print("[INFO]: Skipping WandB registry upload (SKIP_WANDB_UPLOAD=1, local npz saved).")
+                if os.environ.get("CSV_TO_NPZ_FAST_EXIT", "1") == "1":
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    os._exit(0)
+                break
+    finally:
+        if progress is not None:
+            progress.close()
 
 
 def main():

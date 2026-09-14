@@ -28,18 +28,44 @@ if TYPE_CHECKING:
 
 
 class MotionLoader:
-    def __init__(self, motion_file: str, body_indexes: Sequence[int], device: str = "cpu"):
-        assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
-        data = np.load(motion_file)
-        self.fps = data["fps"]
-        self.joint_pos = torch.tensor(data["joint_pos"], dtype=torch.float32, device=device)
-        self.joint_vel = torch.tensor(data["joint_vel"], dtype=torch.float32, device=device)
-        self._body_pos_w = torch.tensor(data["body_pos_w"], dtype=torch.float32, device=device)
-        self._body_quat_w = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)
-        self._body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
-        self._body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
+    """Loads one or more motion .npz files.
+
+    Pass a single path for the original single-motion behavior (e.g. the ``smoke`` test
+    that pulls one clip from the WandB registry). Pass a list of paths (e.g. all the npz
+    files under a ``--motion_dir``) to concatenate them into one buffer and track each
+    clip's offset/length via :attr:`clip_start`/:attr:`clip_len`, so :class:`MotionCommand`
+    can sample across clips. All clips are assumed to share the same fps (csv_to_npz.py's
+    default output is 50fps for all of them).
+    """
+
+    def __init__(self, motion_file: str | Sequence[str], body_indexes: Sequence[int], device: str = "cpu"):
+        motion_files = [motion_file] if isinstance(motion_file, str) else list(motion_file)
+        assert len(motion_files) > 0, "motion_file must be a path or a non-empty list of paths"
+        for f in motion_files:
+            assert os.path.isfile(f), f"Invalid file path: {f}"
+        datas = [np.load(f) for f in motion_files]
+
+        def cat(key: str) -> torch.Tensor:
+            return torch.cat(
+                [torch.tensor(d[key], dtype=torch.float32, device=device) for d in datas], dim=0
+            )
+
+        self.fps = datas[0]["fps"]
+        self.joint_pos = cat("joint_pos")
+        self.joint_vel = cat("joint_vel")
+        self._body_pos_w = cat("body_pos_w")
+        self._body_quat_w = cat("body_quat_w")
+        self._body_lin_vel_w = cat("body_lin_vel_w")
+        self._body_ang_vel_w = cat("body_ang_vel_w")
         self._body_indexes = body_indexes
-        self.time_step_total = self.joint_pos.shape[0]
+
+        clip_lens = torch.tensor([d["joint_pos"].shape[0] for d in datas], dtype=torch.long, device=device)
+        self.clip_len = clip_lens
+        self.clip_start = torch.cumsum(clip_lens, dim=0) - clip_lens
+        self.num_clips = len(datas)
+        # kept for backward compatibility (single-clip code paths / replay_npz.py / exporter.py);
+        # equals clip_len[0] when num_clips == 1, and the combined length across all clips otherwise.
+        self.time_step_total = int(clip_lens.sum().item())
 
     @property
     def body_pos_w(self) -> torch.Tensor:
@@ -73,11 +99,21 @@ class MotionCommand(CommandTerm):
 
         self.motion = MotionLoader(self.cfg.motion_file, self.body_indexes, device=self.device)
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # which clip (into self.motion's concatenated buffer) each env is currently following.
+        # stays all-zero when there's only one clip, so single-motion behavior is unaffected.
+        self.motion_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.body_pos_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 3, device=self.device)
         self.body_quat_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 4, device=self.device)
         self.body_quat_relative_w[:, :, 0] = 1.0
 
-        self.bin_count = int(self.motion.time_step_total // (1 / (env.cfg.decimation * env.cfg.sim.dt))) + 1
+        # the failure-rate-adaptive time-bin sampling below only makes sense within a single
+        # motion; with multiple clips we sample clips uniformly instead (see _resample_command).
+        # Keep bin_count trivial in that case rather than sizing it to the combined length of
+        # every clip.
+        if self.motion.num_clips == 1:
+            self.bin_count = int(self.motion.time_step_total // (1 / (env.cfg.decimation * env.cfg.sim.dt))) + 1
+        else:
+            self.bin_count = 1
         self.bin_failed_count = torch.zeros(self.bin_count, dtype=torch.float, device=self.device)
         self._current_bin_failed = torch.zeros(self.bin_count, dtype=torch.float, device=self.device)
         self.kernel = torch.tensor(
@@ -101,45 +137,49 @@ class MotionCommand(CommandTerm):
     def command(self) -> torch.Tensor:  # TODO Consider again if this is the best observation
         return torch.cat([self.joint_pos, self.joint_vel], dim=1)
 
+    def _frame_idx(self) -> torch.Tensor:
+        """Index into self.motion's concatenated-clips buffer for each env's current frame."""
+        return self.motion.clip_start[self.motion_ids] + self.time_steps
+
     @property
     def joint_pos(self) -> torch.Tensor:
-        return self.motion.joint_pos[self.time_steps]
+        return self.motion.joint_pos[self._frame_idx()]
 
     @property
     def joint_vel(self) -> torch.Tensor:
-        return self.motion.joint_vel[self.time_steps]
+        return self.motion.joint_vel[self._frame_idx()]
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps] + self._env.scene.env_origins[:, None, :]
+        return self.motion.body_pos_w[self._frame_idx()] + self._env.scene.env_origins[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps]
+        return self.motion.body_quat_w[self._frame_idx()]
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.body_lin_vel_w[self.time_steps]
+        return self.motion.body_lin_vel_w[self._frame_idx()]
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.body_ang_vel_w[self.time_steps]
+        return self.motion.body_ang_vel_w[self._frame_idx()]
 
     @property
     def anchor_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, self.motion_anchor_body_index] + self._env.scene.env_origins
+        return self.motion.body_pos_w[self._frame_idx(), self.motion_anchor_body_index] + self._env.scene.env_origins
 
     @property
     def anchor_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps, self.motion_anchor_body_index]
+        return self.motion.body_quat_w[self._frame_idx(), self.motion_anchor_body_index]
 
     @property
     def anchor_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.body_lin_vel_w[self.time_steps, self.motion_anchor_body_index]
+        return self.motion.body_lin_vel_w[self._frame_idx(), self.motion_anchor_body_index]
 
     @property
     def anchor_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.body_ang_vel_w[self.time_steps, self.motion_anchor_body_index]
+        return self.motion.body_ang_vel_w[self._frame_idx(), self.motion_anchor_body_index]
 
     @property
     def robot_joint_pos(self) -> torch.Tensor:
@@ -240,10 +280,29 @@ class MotionCommand(CommandTerm):
         self.metrics["sampling_top1_prob"][:] = pmax
         self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
 
+    def _uniform_clip_sampling(self, env_ids: Sequence[int]):
+        """Multi-clip resampling: pick a clip uniformly, then a start frame uniformly within it.
+
+        This is the "처음엔 클립 균등 샘플링 + 클립 안 시작 시점 균등 샘플링으로 단순화" simplification
+        from docs/실험실행튜토리얼_baselineAB비교.md 6단계 — the failure-rate-adaptive bin sampling in
+        _adaptive_sampling() only makes sense within a single clip's timeline, so with multiple
+        clips we skip it rather than adapt it (candidate Stage-2 improvement: per-clip adaptive
+        sampling). sampling_entropy/top1_prob/top1_bin metrics are left at their initial value
+        (0) in this mode since they describe the (unused) bin distribution.
+        """
+        self.motion_ids[env_ids] = torch.randint(0, self.motion.num_clips, (len(env_ids),), device=self.device)
+        clip_lens = self.motion.clip_len[self.motion_ids[env_ids]]
+        self.time_steps[env_ids] = (
+            sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device) * (clip_lens - 1).clamp(min=0)
+        ).long()
+
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
             return
-        self._adaptive_sampling(env_ids)
+        if self.motion.num_clips > 1:
+            self._uniform_clip_sampling(env_ids)
+        else:
+            self._adaptive_sampling(env_ids)
 
         root_pos = self.body_pos_w[:, 0].clone()
         root_ori = self.body_quat_w[:, 0].clone()
@@ -278,7 +337,9 @@ class MotionCommand(CommandTerm):
 
     def _update_command(self):
         self.time_steps += 1
-        env_ids = torch.where(self.time_steps >= self.motion.time_step_total)[0]
+        # per-env clip length (clip_len[motion_ids] == time_step_total for every env when there's
+        # only one clip, so this is equivalent to the original `>= self.motion.time_step_total`)
+        env_ids = torch.where(self.time_steps >= self.motion.clip_len[self.motion_ids])[0]
         self._resample_command(env_ids)
 
         anchor_pos_w_repeat = self.anchor_pos_w[:, None, :].repeat(1, len(self.cfg.body_names), 1)
@@ -356,7 +417,9 @@ class MotionCommandCfg(CommandTermCfg):
 
     asset_name: str = MISSING
 
-    motion_file: str = MISSING
+    motion_file: str | list[str] = MISSING
+    """A single motion .npz path, or a list of paths to train on multiple clips at once
+    (each env samples a random clip + start frame; see MotionLoader/MotionCommand)."""
     anchor_body_name: str = MISSING
     body_names: list[str] = MISSING
 

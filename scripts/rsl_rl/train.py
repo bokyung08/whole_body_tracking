@@ -24,13 +24,27 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
-parser.add_argument("--registry_name", type=str, required=True, help="The name of the wand registry.")
+parser.add_argument(
+    "--registry_name", type=str, default=None, help="The name of the wandb registry (single motion; smoke test)."
+)
+parser.add_argument(
+    "--motion_dir",
+    type=str,
+    default=None,
+    help=(
+        "Directory of local motion .npz files to train on all of them at once (multi-clip; used for the"
+        " A/B/C AMASS->KIT conditions). Overrides --registry_name if both are given."
+    ),
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+if not args_cli.registry_name and not args_cli.motion_dir:
+    parser.error("one of --registry_name or --motion_dir is required")
 
 # always enable cameras to record video
 if args_cli.video:
@@ -88,17 +102,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    # load the motion file from the wandb registry
-    registry_name = args_cli.registry_name
-    if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
-        registry_name += ":latest"
+    # load the motion file(s): either a local directory of npz clips (multi-clip A/B/C
+    # training, --motion_dir) or a single clip from the wandb registry (--registry_name,
+    # original single-motion / smoke-test path)
     import pathlib
 
-    import wandb
+    registry_name = args_cli.registry_name
+    if args_cli.motion_dir:
+        motion_dir = pathlib.Path(args_cli.motion_dir)
+        motion_files = sorted(str(p) for p in motion_dir.glob("*.npz"))
+        if not motion_files:
+            raise FileNotFoundError(f"No .npz files found in --motion_dir {motion_dir}")
+        print(f"[INFO] Training on {len(motion_files)} motion clips from {motion_dir}")
+        env_cfg.commands.motion.motion_file = motion_files
+        # not pulled from the wandb registry, so there's nothing to link as a used artifact
+        registry_name = None
+    else:
+        if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
+            registry_name += ":latest"
 
-    api = wandb.Api()
-    artifact = api.artifact(registry_name)
-    env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+        import wandb
+
+        api = wandb.Api()
+        artifact = api.artifact(registry_name)
+        env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
