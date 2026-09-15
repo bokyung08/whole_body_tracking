@@ -38,7 +38,9 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import collections
 import gymnasium as gym
+import json
 import os
 import pathlib
 import torch
@@ -110,6 +112,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
 
+        # NOTE: this was previously only done in the --wandb_path branch above, so evaluating a
+        # locally-loaded checkpoint (--load_run/--checkpoint) with --motion_file left
+        # env_cfg.commands.motion.motion_file unset -> "Missing values ... motion_file" on
+        # gym.make(). --motion_file is the only way to set it in this branch (no wandb artifact
+        # to fall back on), so always apply it here.
+        if args_cli.motion_file is not None:
+            print(f"[INFO]: Using motion file from CLI: {args_cli.motion_file}")
+            env_cfg.commands.motion.motion_file = args_cli.motion_file
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
@@ -152,6 +163,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         filename="policy.onnx",
     )
     attach_onnx_metadata(env.unwrapped, args_cli.wandb_path if args_cli.wandb_path else "none", export_model_dir)
+    # Optional: save tracking-error / success-rate metrics to a JSON file for a fixed number
+    # of steps, for the A/B/C kit_test/amass_test comparison (Windows tutorial, step 11).
+    # Without this, the play loop below runs forever (`while simulation_app.is_running()`),
+    # so batch eval scripts (04_eval.ps1) that call play.py once per clip need a concrete
+    # stopping point -- EVAL_OUT set means "run EVAL_STEPS steps, then save and exit" instead
+    # of "run until the window is closed".
+    eval_out = os.environ.get("EVAL_OUT")
+    eval_steps = int(os.environ.get("EVAL_STEPS", "1500"))  # 1500 steps @ 50 Hz control = 30s
+    if eval_out:
+        motion_term = env.unwrapped.command_manager.get_term("motion")
+        termination_manager = env.unwrapped.termination_manager
+        eval_log = collections.defaultdict(list)
+        eval_fails = 0
+        eval_timeouts = 0
+
     # reset environment
     obs, _ = env.get_observations()
     timestep = 0
@@ -163,11 +189,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions = policy(obs)
             # env stepping
             obs, _, _, _ = env.step(actions)
+        if eval_out:
+            for key in ("error_body_pos", "error_joint_pos", "error_anchor_pos"):
+                eval_log[key].append(motion_term.metrics[key].mean().item())
+            eval_fails += int(termination_manager.terminated.sum().item())
+            eval_timeouts += int(termination_manager.time_outs.sum().item())
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
+        elif eval_out:
+            timestep += 1
+            if timestep >= eval_steps:
+                break
+
+    if eval_out:
+        results = {key: sum(vals) / len(vals) for key, vals in eval_log.items()}
+        results["success_rate"] = eval_timeouts / max(eval_fails + eval_timeouts, 1)
+        results["eval_steps"] = eval_steps
+        with open(eval_out, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"[INFO] Saved eval metrics to {eval_out}: {results}")
 
     # close the simulator
     env.close()
