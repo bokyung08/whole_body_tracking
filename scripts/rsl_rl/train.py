@@ -36,6 +36,17 @@ parser.add_argument(
         " A/B/C AMASS->KIT conditions). Overrides --registry_name if both are given."
     ),
 )
+parser.add_argument(
+    "--kl_coef",
+    type=float,
+    default=0.0,
+    help=(
+        "RL's Razor-style KL regularization coefficient (Shenfeld et al., 2025, arXiv:2509.04259): adds"
+        " kl_coef * KL(pi_new || pi_reference) to the PPO loss, where pi_reference is a frozen copy of the"
+        " --load_run/--checkpoint being resumed from. 0 (default) disables it. Requires --resume True; meant"
+        " for condition B (KIT fine-tuning from A's checkpoint) to reduce seed-to-seed variance and forgetting."
+    ),
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -45,6 +56,8 @@ args_cli, hydra_args = parser.parse_known_args()
 
 if not args_cli.registry_name and not args_cli.motion_dir:
     parser.error("one of --registry_name or --motion_dir is required")
+if args_cli.kl_coef > 0 and not args_cli.resume:
+    parser.error("--kl_coef > 0 requires --resume True (it regularizes toward the --load_run/--checkpoint being resumed from)")
 
 # always enable cameras to record video
 if args_cli.video:
@@ -79,6 +92,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # Import extensions to set up environment tasks
 import whole_body_tracking.tasks  # noqa: F401
+from whole_body_tracking.utils.kl_regularized_ppo import attach_kl_regularization
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -171,6 +185,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
+        # optionally regularize fine-tuning toward this same checkpoint (RL's Razor-style
+        # KL penalty, see whole_body_tracking/utils/kl_regularized_ppo.py)
+        if args_cli.kl_coef > 0:
+            attach_kl_regularization(runner, resume_path, args_cli.kl_coef)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
