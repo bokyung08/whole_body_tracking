@@ -47,6 +47,17 @@ parser.add_argument(
         " for condition B (KIT fine-tuning from A's checkpoint) to reduce seed-to-seed variance and forgetting."
     ),
 )
+parser.add_argument(
+    "--r2_curriculum",
+    action="store_true",
+    default=False,
+    help=(
+        "Enable the R2 curriculum (KungfuBot-style, Xie et al., 2025, arXiv:2506.12851): adaptive"
+        " exp-reward tracking std (sigma <- min(sigma, EMA(error))) plus exponential termination-threshold"
+        " and penalty-weight curricula. See whole_body_tracking/utils/r2_curriculum.py. Off by default;"
+        " does not affect A/B/C/R1/D1 runs."
+    ),
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -94,6 +105,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.kl_regularized_ppo import attach_kl_regularization
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
+from whole_body_tracking.utils.r2_curriculum import attach_r2_curriculum
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -140,6 +152,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         api = wandb.Api()
         artifact = api.artifact(registry_name)
         env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+
+    if args_cli.r2_curriculum:
+        attach_r2_curriculum(env_cfg)
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
