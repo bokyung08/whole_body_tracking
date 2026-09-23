@@ -58,9 +58,17 @@ def adapt_tracking_std(
         min_std: Floor so std can't collapse to (near-)zero and starve the reward/gradient.
     """
     command = env.command_manager.get_term("motion")
-    error = command.metrics[metric_name][env_ids]
+    term_cfg = env.reward_manager.get_term_cfg(term_name)
+    # error_body_lin_vel/error_body_ang_vel aren't pre-allocated in MotionCommand.__init__ (only
+    # error_anchor_*/error_body_pos/error_body_rot/error_joint_* are) -- they get added lazily on the
+    # first metrics update, which happens AFTER the very first env.reset() that creates this curriculum
+    # call. So the key may simply not exist yet; treat that the same as "no data this call" (env_ids
+    # empty) rather than letting it crash iteration 0 of every run.
+    metric = command.metrics.get(metric_name)
+    if metric is None:
+        return term_cfg.params["std"]
+    error = metric[env_ids]
     if error.numel() == 0:
-        term_cfg = env.reward_manager.get_term_cfg(term_name)
         return term_cfg.params["std"]
     batch_mean = error.mean().item()
 
@@ -71,7 +79,6 @@ def adapt_tracking_std(
     else:
         env._amt_ema[term_name] = (1.0 - ema_alpha) * env._amt_ema[term_name] + ema_alpha * batch_mean
 
-    term_cfg = env.reward_manager.get_term_cfg(term_name)
     new_std = min(term_cfg.params["std"], max(env._amt_ema[term_name], min_std))
     term_cfg.params["std"] = new_std
     env.reward_manager.set_term_cfg(term_name, term_cfg)
