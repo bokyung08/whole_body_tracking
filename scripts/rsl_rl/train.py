@@ -48,6 +48,17 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--adaptive_clip_sampling",
+    action="store_true",
+    default=False,
+    help=(
+        "D2 (GMT/PHC-style, opt-in): with --motion_dir (multiple clips), sample clips proportional to"
+        " their recent EMA'd failure rate instead of uniformly, so the policy gets more practice on"
+        " clips it currently fails. Off by default; does not affect A/B/C/R1/D1/R2 runs. See"
+        " whole_body_tracking/tasks/tracking/mdp/commands.py's MotionCommand._adaptive_clip_sampling."
+    ),
+)
+parser.add_argument(
     "--r2_curriculum",
     action="store_true",
     default=False,
@@ -141,6 +152,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             raise FileNotFoundError(f"No .npz files found in --motion_dir {motion_dir}")
         print(f"[INFO] Training on {len(motion_files)} motion clips from {motion_dir}")
         env_cfg.commands.motion.motion_file = motion_files
+        if args_cli.adaptive_clip_sampling:
+            env_cfg.commands.motion.adaptive_clip_sampling = True
+            print("[INFO] D2 adaptive clip sampling enabled (samples clips proportional to EMA'd failure rate)")
         # not pulled from the wandb registry, so there's nothing to link as a used artifact
         registry_name = None
     else:

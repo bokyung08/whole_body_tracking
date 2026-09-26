@@ -121,6 +121,13 @@ class MotionCommand(CommandTerm):
         )
         self.kernel = self.kernel / self.kernel.sum()
 
+        # D2 (opt-in, cfg.adaptive_clip_sampling): same EMA-of-failure-rate idea as the time-bin
+        # adaptive sampler above (_adaptive_sampling), but keyed by clip index instead of time-bin
+        # index -- oversamples clips the policy currently fails on more often, instead of the static
+        # "drop the always-failing clips" curation D1 did. See _adaptive_clip_sampling().
+        self.clip_failed_count = torch.zeros(self.motion.num_clips, dtype=torch.float, device=self.device)
+        self._current_clip_failed = torch.zeros(self.motion.num_clips, dtype=torch.float, device=self.device)
+
         self.metrics["error_anchor_pos"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_anchor_rot"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_anchor_lin_vel"] = torch.zeros(self.num_envs, device=self.device)
@@ -296,11 +303,44 @@ class MotionCommand(CommandTerm):
             sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device) * (clip_lens - 1).clamp(min=0)
         ).long()
 
+    def _adaptive_clip_sampling(self, env_ids: Sequence[int]):
+        """D2: pick a clip with probability proportional to its recent (EMA'd) failure rate,
+        then a start frame uniformly within it. Mirrors _adaptive_sampling()'s bin_failed_count/
+        adaptive_alpha/adaptive_uniform_ratio machinery exactly, but keyed by clip index -- no
+        kernel smoothing (clip index order is arbitrary/alphabetical, unlike time bins, so
+        smoothing across neighboring indices wouldn't mean anything)."""
+        episode_failed = self._env.termination_manager.terminated[env_ids]
+        if torch.any(episode_failed):
+            fail_clips = self.motion_ids[env_ids][episode_failed]
+            self._current_clip_failed[:] = torch.bincount(fail_clips, minlength=self.motion.num_clips)
+
+        sampling_probabilities = self.clip_failed_count + self.cfg.adaptive_uniform_ratio / float(
+            self.motion.num_clips
+        )
+        sampling_probabilities = sampling_probabilities / sampling_probabilities.sum()
+
+        self.motion_ids[env_ids] = torch.multinomial(sampling_probabilities, len(env_ids), replacement=True)
+        clip_lens = self.motion.clip_len[self.motion_ids[env_ids]]
+        self.time_steps[env_ids] = (
+            sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device) * (clip_lens - 1).clamp(min=0)
+        ).long()
+
+        # Metrics (reused names: now describe the clip distribution rather than the time-bin one)
+        H = -(sampling_probabilities * (sampling_probabilities + 1e-12).log()).sum()
+        H_norm = H / math.log(self.motion.num_clips)
+        pmax, imax = sampling_probabilities.max(dim=0)
+        self.metrics["sampling_entropy"][:] = H_norm
+        self.metrics["sampling_top1_prob"][:] = pmax
+        self.metrics["sampling_top1_bin"][:] = imax.float() / self.motion.num_clips
+
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
             return
         if self.motion.num_clips > 1:
-            self._uniform_clip_sampling(env_ids)
+            if self.cfg.adaptive_clip_sampling:
+                self._adaptive_clip_sampling(env_ids)
+            else:
+                self._uniform_clip_sampling(env_ids)
         else:
             self._adaptive_sampling(env_ids)
 
@@ -358,6 +398,13 @@ class MotionCommand(CommandTerm):
             self.cfg.adaptive_alpha * self._current_bin_failed + (1 - self.cfg.adaptive_alpha) * self.bin_failed_count
         )
         self._current_bin_failed.zero_()
+
+        if self.cfg.adaptive_clip_sampling:
+            self.clip_failed_count = (
+                self.cfg.adaptive_alpha * self._current_clip_failed
+                + (1 - self.cfg.adaptive_alpha) * self.clip_failed_count
+            )
+            self._current_clip_failed.zero_()
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
@@ -432,6 +479,10 @@ class MotionCommandCfg(CommandTermCfg):
     adaptive_lambda: float = 0.8
     adaptive_uniform_ratio: float = 0.1
     adaptive_alpha: float = 0.001
+
+    adaptive_clip_sampling: bool = False
+    """D2 (opt-in, off by default): with multiple clips (--motion_dir), sample clips proportional
+    to their recent EMA'd failure rate instead of uniformly. See MotionCommand._adaptive_clip_sampling."""
 
     anchor_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     anchor_visualizer_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)
