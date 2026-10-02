@@ -61,6 +61,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # Import extensions to set up environment tasks
 import whole_body_tracking.tasks  # noqa: F401
+from whole_body_tracking.utils.eval_metrics import compute_settling_metrics
 from whole_body_tracking.utils.exporter import attach_onnx_metadata, export_motion_policy_as_onnx
 
 
@@ -208,6 +209,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         results = {key: sum(vals) / len(vals) for key, vals in eval_log.items()}
         results["success_rate"] = eval_timeouts / max(eval_fails + eval_timeouts, 1)
         results["eval_steps"] = eval_steps
+        # Settling time / overshoot / steady-state error, adapted from step-response control
+        # analysis to this continuous-tracking task (see eval_metrics.py docstring) -- computed
+        # from the initial transient only, since that's the one synchronized "step" every env in
+        # this run shares (all envs reset together right before the loop above starts).
+        results.update(compute_settling_metrics(eval_log["error_body_pos"], dt=env.unwrapped.step_dt))
         with open(eval_out, "w") as f:
             json.dump(results, f, indent=2)
         print(f"[INFO] Saved eval metrics to {eval_out}: {results}")
