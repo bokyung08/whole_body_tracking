@@ -236,7 +236,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 break
 
     if eval_out:
-        results = {key: sum(vals) / len(vals) for key, vals in eval_log.items()}
+        # CommandTerm.compute() calls _update_metrics() BEFORE _update_command() (see
+        # managers/command_manager.py), so eval_log's error_* values are also one step
+        # "behind" the reference buffer -- on the very first recorded step this means they're
+        # computed against the same zero-initialized body_pos_relative_w as the termination
+        # check above, not just reflecting last step's (otherwise negligible) lag. Drop the
+        # same EVAL_WARMUP_STEPS from these means too, for the same reason as eval_fails/
+        # eval_timeouts above. eval_log itself is left untrimmed (full warmup included) since
+        # compute_settling_metrics() below does its own warmup_steps trim and offset math.
+        results = {key: sum(vals[EVAL_WARMUP_STEPS:]) / len(vals[EVAL_WARMUP_STEPS:]) for key, vals in eval_log.items()}
         results["success_rate"] = eval_timeouts / max(eval_fails + eval_timeouts, 1)
         results["eval_steps"] = eval_steps
         # Settling time / overshoot / steady-state error, adapted from step-response control
