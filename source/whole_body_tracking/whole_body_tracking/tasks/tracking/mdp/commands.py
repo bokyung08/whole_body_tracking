@@ -433,8 +433,8 @@ class MotionCommand(CommandTerm):
             self.current_anchor_visualizer.set_visibility(True)
             self.goal_anchor_visualizer.set_visibility(True)
             for i in range(len(self.cfg.body_names)):
-                self.current_body_visualizers[i].set_visibility(True)
-                self.goal_body_visualizers[i].set_visibility(True)
+                self.current_body_visualizers[i].set_visibility(self.cfg.show_body_markers)
+                self.goal_body_visualizers[i].set_visibility(self.cfg.show_body_markers)
 
         else:
             if hasattr(self, "current_anchor_visualizer"):
@@ -451,9 +451,12 @@ class MotionCommand(CommandTerm):
         self.current_anchor_visualizer.visualize(self.robot_anchor_pos_w, self.robot_anchor_quat_w)
         self.goal_anchor_visualizer.visualize(self.anchor_pos_w, self.anchor_quat_w)
 
-        for i in range(len(self.cfg.body_names)):
-            self.current_body_visualizers[i].visualize(self.robot_body_pos_w[:, i], self.robot_body_quat_w[:, i])
-            self.goal_body_visualizers[i].visualize(self.body_pos_relative_w[:, i], self.body_quat_relative_w[:, i])
+        if self.cfg.show_body_markers:
+            for i in range(len(self.cfg.body_names)):
+                self.current_body_visualizers[i].visualize(self.robot_body_pos_w[:, i], self.robot_body_quat_w[:, i])
+                self.goal_body_visualizers[i].visualize(
+                    self.body_pos_relative_w[:, i], self.body_quat_relative_w[:, i]
+                )
 
 
 @configclass
@@ -489,3 +492,9 @@ class MotionCommandCfg(CommandTermCfg):
 
     body_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     body_visualizer_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
+
+    show_body_markers: bool = True
+    """Opt-out (default on, unchanged behavior): with ~14 tracked bodies, the full current+goal
+    frame-marker set is dense enough to obscure the robot in rendered video. Set False (e.g. from
+    play.py for a demo render) to show only the anchor (root) current/goal markers -- still proves
+    the policy is tracking the reference, with far less visual clutter."""
