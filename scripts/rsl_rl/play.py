@@ -180,6 +180,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # of "run until the window is closed".
     eval_out = os.environ.get("EVAL_OUT")
     eval_steps = int(os.environ.get("EVAL_STEPS", "1500"))  # 1500 steps @ 50 Hz control = 30s
+    # ManagerBasedRLEnv.step() calls termination_manager.compute() BEFORE command_manager.compute()
+    # (see envs/manager_based_rl_env.py) -- on a freshly-created env, the very first step() checks
+    # termination against MotionCommand.body_pos_relative_w while it's still zero-initialized
+    # (command_manager.reset(), called during env setup, only resamples the clip/robot pose; it does
+    # NOT populate body_pos_relative_w -- that only happens inside _update_command(), called from
+    # command_manager.compute(), which runs LATER in that same first step()). So every eval run gets
+    # exactly one guaranteed spurious termination on its first recorded step. With only ~3
+    # episode-lengths fitting in a 1500-step eval window, that single bogus failure caps measured
+    # success_rate at ~2/3 regardless of actual tracking quality -- confirmed by the exact 0.667
+    # clustering across clips with wildly different error_body_pos. error_body_pos/error_joint_pos/
+    # error_anchor_pos are NOT affected by this specific bug: play.py reads motion_term.metrics
+    # AFTER env.step() returns, by which point command_manager.compute() has already refreshed
+    # body_pos_relative_w for that same step (termination fires first, using the old/zero value, but
+    # the logged error always reflects the just-recomputed one). success_rate is a count over only
+    # ~3 discrete episode-trials, so losing 1 to this bug is catastrophic there specifically. See
+    # docs/진행상황_연구노트.md.
+    EVAL_WARMUP_STEPS = 2
     if eval_out:
         motion_term = env.unwrapped.command_manager.get_term("motion")
         termination_manager = env.unwrapped.termination_manager
@@ -201,8 +218,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if eval_out:
             for key in ("error_body_pos", "error_joint_pos", "error_anchor_pos"):
                 eval_log[key].append(motion_term.metrics[key].mean().item())
-            eval_fails += int(termination_manager.terminated.sum().item())
-            eval_timeouts += int(termination_manager.time_outs.sum().item())
+            # Skip the warmup window for success_rate counting (see EVAL_WARMUP_STEPS comment
+            # above) -- the stale-buffer artifact causes a guaranteed spurious termination on
+            # step 0 of every eval run, which with only ~3 episodes fitting in the eval window
+            # caps measured success_rate at ~2/3 regardless of actual tracking quality.
+            if timestep >= EVAL_WARMUP_STEPS:
+                eval_fails += int(termination_manager.terminated.sum().item())
+                eval_timeouts += int(termination_manager.time_outs.sum().item())
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
