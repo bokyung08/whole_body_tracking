@@ -91,6 +91,18 @@ parser.add_argument(
     help="Iterations over which --action_prior_coef linearly decays to 0. Ignored if --action_prior_coef is 0.",
 )
 parser.add_argument(
+    "--adversarial_push",
+    action="store_true",
+    default=False,
+    help=(
+        "N4 candidate (SA2RT-style, arXiv:2507.08303): replace the static uniform-random push"
+        " event (events.push_robot) with a small learned, state-conditioned, selective"
+        " adversarial perturber (same max push range, trained online via one-step REINFORCE"
+        " toward disrupting tracking). Off by default. See"
+        " whole_body_tracking/tasks/tracking/mdp/adversarial_push.py."
+    ),
+)
+parser.add_argument(
     "--r2_curriculum",
     action="store_true",
     default=False,
@@ -159,6 +171,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # Import extensions to set up environment tasks
 import whole_body_tracking.tasks  # noqa: F401
+from whole_body_tracking.tasks.tracking.mdp.adversarial_push import adversarial_push
 from whole_body_tracking.utils.action_prior_ppo import attach_action_prior
 from whole_body_tracking.utils.kl_regularized_ppo import attach_kl_regularization
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
@@ -219,6 +232,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if args_cli.r2_curriculum:
         attach_r2_curriculum(env_cfg)
+
+    if args_cli.adversarial_push:
+        env_cfg.events.push_robot.func = adversarial_push
+        print("[INFO] N4 adversarial push enabled (learned selective perturber replaces static random push)")
 
     if args_cli.symmetry_loss > 0:
         agent_cfg.algorithm.symmetry_cfg = RslRlSymmetryCfg(
