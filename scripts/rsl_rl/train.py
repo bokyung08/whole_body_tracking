@@ -59,6 +59,20 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--segment_adaptive_sampling",
+    action="store_true",
+    default=False,
+    help=(
+        "N1 (Stubborn-style, arXiv:2606.12814): with --motion_dir (multiple clips), keep clip"
+        " selection uniform but bias the start frame within whichever clip is picked toward that"
+        " clip's own recently-failing segment. Fixes D2's failure mode (a single infeasible clip"
+        " swallowing most of the sampling budget) by never letting clip choice itself be"
+        " failure-weighted. Off by default. Mutually exclusive with --adaptive_clip_sampling (D2);"
+        " if both are given, D2 takes precedence. See"
+        " whole_body_tracking/tasks/tracking/mdp/commands.py's MotionCommand._segment_adaptive_clip_sampling."
+    ),
+)
+parser.add_argument(
     "--r2_curriculum",
     action="store_true",
     default=False,
@@ -167,6 +181,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.adaptive_clip_sampling:
             env_cfg.commands.motion.adaptive_clip_sampling = True
             print("[INFO] D2 adaptive clip sampling enabled (samples clips proportional to EMA'd failure rate)")
+        if args_cli.segment_adaptive_sampling:
+            env_cfg.commands.motion.segment_adaptive_sampling = True
+            print("[INFO] N1 segment-adaptive sampling enabled (uniform clip choice, failure-biased start segment)")
         # not pulled from the wandb registry, so there's nothing to link as a used artifact
         registry_name = None
     else:

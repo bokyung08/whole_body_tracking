@@ -128,6 +128,15 @@ class MotionCommand(CommandTerm):
         self.clip_failed_count = torch.zeros(self.motion.num_clips, dtype=torch.float, device=self.device)
         self._current_clip_failed = torch.zeros(self.motion.num_clips, dtype=torch.float, device=self.device)
 
+        # N1 (opt-in, cfg.segment_adaptive_sampling): per-clip version of the time-bin EMA
+        # failure sampler above, see _segment_adaptive_clip_sampling().
+        self.segment_failed_count = torch.zeros(
+            self.motion.num_clips, self.cfg.segment_bins, dtype=torch.float, device=self.device
+        )
+        self._current_segment_failed = torch.zeros(
+            self.motion.num_clips, self.cfg.segment_bins, dtype=torch.float, device=self.device
+        )
+
         self.metrics["error_anchor_pos"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_anchor_rot"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_anchor_lin_vel"] = torch.zeros(self.num_envs, device=self.device)
@@ -333,12 +342,61 @@ class MotionCommand(CommandTerm):
         self.metrics["sampling_top1_prob"][:] = pmax
         self.metrics["sampling_top1_bin"][:] = imax.float() / self.motion.num_clips
 
+    def _segment_adaptive_clip_sampling(self, env_ids: Sequence[int]):
+        """N1 (Stubborn-style, arXiv:2606.12814): clip *choice* stays uniform (see
+        _uniform_clip_sampling) -- unlike D2, no clip can ever claim more than its 1/num_clips
+        share of the batch, no matter how often it fails. Only *where inside* the chosen clip to
+        start is biased, toward that clip's own recently-failing segment (an EMA'd failure-rate
+        histogram over cfg.segment_bins cells, tracked separately per clip). This is the direct
+        fix for D2's failure mode (docs/진행상황_연구노트.md 2026-09-27): D2 reweighted whole
+        clips by failure rate, so a single physically-infeasible clip's probability saturated
+        (80-93% in testing) and starved every other clip of practice time."""
+        episode_failed = self._env.termination_manager.terminated[env_ids]
+        if torch.any(episode_failed):
+            old_motion_ids = self.motion_ids[env_ids][episode_failed]
+            old_clip_lens = self.motion.clip_len[old_motion_ids]
+            old_segment = torch.clamp(
+                (self.time_steps[env_ids][episode_failed] * self.cfg.segment_bins) // old_clip_lens.clamp(min=1),
+                0,
+                self.cfg.segment_bins - 1,
+            )
+            flat_idx = old_motion_ids * self.cfg.segment_bins + old_segment
+            self._current_segment_failed[:] = torch.bincount(
+                flat_idx, minlength=self.motion.num_clips * self.cfg.segment_bins
+            ).view(self.motion.num_clips, self.cfg.segment_bins).float()
+
+        # Uniform clip choice -- this (not the segment bias below) is what fixes D2's failure mode.
+        self.motion_ids[env_ids] = torch.randint(0, self.motion.num_clips, (len(env_ids),), device=self.device)
+        clip_lens = self.motion.clip_len[self.motion_ids[env_ids]]
+
+        # Within the chosen clip, bias the start segment toward its own recent failures.
+        probs = self.segment_failed_count[self.motion_ids[env_ids]] + self.cfg.adaptive_uniform_ratio / float(
+            self.cfg.segment_bins
+        )
+        probs = probs / probs.sum(dim=-1, keepdim=True)
+        sampled_segment = torch.multinomial(probs, 1).squeeze(-1)
+        self.time_steps[env_ids] = (
+            (sampled_segment + sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device))
+            / self.cfg.segment_bins
+            * (clip_lens - 1).clamp(min=0)
+        ).long()
+
+        # Metrics (reused names): per-env value for the chosen clip's own segment distribution --
+        # a per-env-batched analogue of _adaptive_sampling's single global entropy/top1_prob/top1_bin.
+        H = -(probs * (probs + 1e-12).log()).sum(dim=-1) / math.log(self.cfg.segment_bins)
+        pmax, imax = probs.max(dim=-1)
+        self.metrics["sampling_entropy"][env_ids] = H
+        self.metrics["sampling_top1_prob"][env_ids] = pmax
+        self.metrics["sampling_top1_bin"][env_ids] = imax.float() / self.cfg.segment_bins
+
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
             return
         if self.motion.num_clips > 1:
             if self.cfg.adaptive_clip_sampling:
                 self._adaptive_clip_sampling(env_ids)
+            elif self.cfg.segment_adaptive_sampling:
+                self._segment_adaptive_clip_sampling(env_ids)
             else:
                 self._uniform_clip_sampling(env_ids)
         else:
@@ -405,6 +463,13 @@ class MotionCommand(CommandTerm):
                 + (1 - self.cfg.adaptive_alpha) * self.clip_failed_count
             )
             self._current_clip_failed.zero_()
+
+        if self.cfg.segment_adaptive_sampling:
+            self.segment_failed_count = (
+                self.cfg.adaptive_alpha * self._current_segment_failed
+                + (1 - self.cfg.adaptive_alpha) * self.segment_failed_count
+            )
+            self._current_segment_failed.zero_()
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
@@ -486,6 +551,24 @@ class MotionCommandCfg(CommandTermCfg):
     adaptive_clip_sampling: bool = False
     """D2 (opt-in, off by default): with multiple clips (--motion_dir), sample clips proportional
     to their recent EMA'd failure rate instead of uniformly. See MotionCommand._adaptive_clip_sampling."""
+
+    segment_adaptive_sampling: bool = False
+    """N1 (opt-in, off by default; Stubborn-style, arXiv:2606.12814): with multiple clips, keep
+    clip *selection* uniform (unlike D2) but, within whichever clip is picked, bias the start
+    frame toward that clip's own recently-failing segment instead of sampling it uniformly. This
+    targets D2's actual failure mode directly: D2 reweights whole clips by failure rate, so a
+    single physically-infeasible clip's probability saturates and swallows most of the sampling
+    budget (docs/진행상황_연구노트.md 2026-09-27). Biasing only *where inside* a clip to start,
+    while leaving *which* clip gets picked uniform, means an unsolvable clip can never claim more
+    than its 1/num_clips share -- it just wastes that share on itself instead of starving the
+    other clips. See MotionCommand._segment_adaptive_clip_sampling. Mutually exclusive with
+    adaptive_clip_sampling (D2); if both are set, D2 takes precedence (see _resample_command)."""
+
+    segment_bins: int = 10
+    """Number of per-clip time segments N1's failure-rate EMA is tracked over (coarser than the
+    single-clip _adaptive_sampling's bin_count, which is sized ~1-per-control-step -- that would
+    be `num_clips * hundreds` of EMA cells here, which is both wasteful and noisier per cell since
+    each clip gets far fewer episodes than the single-clip case did)."""
 
     anchor_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     anchor_visualizer_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)
