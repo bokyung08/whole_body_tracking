@@ -69,6 +69,16 @@ parser.add_argument(
         " does not affect A/B/C/R1/D1 runs."
     ),
 )
+parser.add_argument(
+    "--symmetry_loss",
+    type=float,
+    default=0.0,
+    help=(
+        "N2 candidate (Mittal et al., 2024, arXiv:2403.04359): left-right mirror-consistency"
+        " auxiliary loss, coefficient * MSE(pi(mirror(obs)), mirror(pi(obs))). 0 (default) disables"
+        " it. See whole_body_tracking/utils/symmetry.py for the G1-specific mirror transform."
+    ),
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -109,6 +119,7 @@ from isaaclab.envs import (
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_pickle, dump_yaml
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
+from isaaclab_rl.rsl_rl.symmetry_cfg import RslRlSymmetryCfg
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
@@ -117,6 +128,7 @@ import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.kl_regularized_ppo import attach_kl_regularization
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
 from whole_body_tracking.utils.r2_curriculum import attach_r2_curriculum
+from whole_body_tracking.utils.symmetry import g1_tracking_mirror_augmentation
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -169,6 +181,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if args_cli.r2_curriculum:
         attach_r2_curriculum(env_cfg)
+
+    if args_cli.symmetry_loss > 0:
+        agent_cfg.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=False,
+            use_mirror_loss=True,
+            mirror_loss_coeff=args_cli.symmetry_loss,
+            data_augmentation_func=g1_tracking_mirror_augmentation,
+        )
+        print(f"[INFO] N2 symmetry auxiliary loss enabled (Mittal et al., 2024): coeff={args_cli.symmetry_loss}")
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
