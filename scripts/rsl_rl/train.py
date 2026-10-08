@@ -73,6 +73,24 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--action_prior_coef",
+    type=float,
+    default=0.0,
+    help=(
+        "N3 candidate (APEX-style, arXiv:2505.10022): adds coef(t) * MSE(policy_mean_action,"
+        " prior_action) to the PPO loss, where prior_action is the raw action that would exactly"
+        " reproduce the reference motion's target joint pose, and coef(t) linearly decays from"
+        " this value to 0 over --action_prior_decay_iters iterations (pure RL at convergence)."
+        " 0 (default) disables it. See whole_body_tracking/utils/action_prior_ppo.py."
+    ),
+)
+parser.add_argument(
+    "--action_prior_decay_iters",
+    type=int,
+    default=5000,
+    help="Iterations over which --action_prior_coef linearly decays to 0. Ignored if --action_prior_coef is 0.",
+)
+parser.add_argument(
     "--r2_curriculum",
     action="store_true",
     default=False,
@@ -104,6 +122,8 @@ if not args_cli.registry_name and not args_cli.motion_dir:
     parser.error("one of --registry_name or --motion_dir is required")
 if args_cli.kl_coef > 0 and not args_cli.resume:
     parser.error("--kl_coef > 0 requires --resume True (it regularizes toward the --load_run/--checkpoint being resumed from)")
+if args_cli.kl_coef > 0 and args_cli.action_prior_coef > 0:
+    parser.error("--kl_coef and --action_prior_coef both swap runner.alg's __class__ (KLRegularizedPPO vs ActionPriorPPO) and cannot be combined")
 
 # always enable cameras to record video
 if args_cli.video:
@@ -139,6 +159,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # Import extensions to set up environment tasks
 import whole_body_tracking.tasks  # noqa: F401
+from whole_body_tracking.utils.action_prior_ppo import attach_action_prior
 from whole_body_tracking.utils.kl_regularized_ppo import attach_kl_regularization
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
 from whole_body_tracking.utils.r2_curriculum import attach_r2_curriculum
@@ -245,6 +266,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     )
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
+
+    if args_cli.action_prior_coef > 0:
+        attach_action_prior(env, runner, args_cli.action_prior_coef, args_cli.action_prior_decay_iters)
+
     # save resume path before creating a new log_dir
     if agent_cfg.resume:
         # get path to previous checkpoint
