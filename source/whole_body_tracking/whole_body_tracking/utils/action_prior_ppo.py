@@ -1,19 +1,19 @@
-"""Decaying demonstration-action-prior PPO (candidate N3, APEX-style).
+"""감쇠하는 시연-행동 사전분포(action prior)를 더한 PPO (N3 후보, APEX 스타일).
 
-Motivation (literature survey, Phase 10 redesign; g1-fullscale-tracking's
-docs/진행상황_연구노트이.md 2026-10-08 new-candidate list): APEX (arXiv:2505.10022, 2025) adds a
-demonstration-conditioned action prior early in training -- here, the reference motion's own
-target joint pose, which this task already has on hand every step (no extra demonstration data
-needed) -- and decays its influence to zero, so training ends as pure RL with no prior bias. The
-intent is faster/more stable early learning (the prior gives useful gradient signal before the
-policy's own value estimates are any good) without biasing the converged policy. (Scope note: the
-plan document's N3 is this decaying action-prior piece only, not APEX's separate second
-task/style critic head -- that is a materially larger, riskier change to rsl_rl's rollout storage
-and was left out of this screening candidate; see the 2026-10-09 "N3 scope" note in
-진행상황_연구노트.md.)
+배경 (문헌 조사, Phase 10 재설계; g1-fullscale-tracking의 docs/진행상황_연구노트.md 2026-10-08
+신규 후보 목록 참고): APEX(arXiv:2505.10022, 2025)는 학습 초반에 시연(demonstration) 조건부
+행동 사전분포를 더해준다 — 여기서는 이 과제가 매 스텝 이미 가지고 있는 참조 동작의 목표 관절
+자세를 그대로 "시연"으로 쓰므로 별도의 시연 데이터가 필요 없다 — 그리고 그 영향력을 0까지
+서서히 줄여서, 학습이 끝날 때는 사전분포 편향이 전혀 없는 순수 RL이 되게 한다. 의도는 학습
+초반(정책 자신의 가치 추정이 아직 쓸모없을 때)에 더 빠르고 안정적인 학습 신호를 주되, 수렴한
+정책에는 편향을 남기지 않는 것이다. (범위 참고: 계획서의 N3는 이 "감쇠하는 행동 사전분포"
+부분만을 가리키며, APEX 원 논문의 별도 2번째 과업/스타일 critic head는 포함하지 않는다 — 그건
+rsl_rl의 rollout storage 구조 자체를 바꿔야 하는 훨씬 크고 위험한 변경이라 이번 스크리닝
+후보에서는 제외했다. 자세한 내용은 진행상황_연구노트.md의 2026-10-09 "N3 범위" 항목 참고.)
 
-Not a standalone algorithm: `attach_action_prior()` upgrades an already-constructed
-`rsl_rl.algorithms.ppo.PPO` instance in place, same pattern as kl_regularized_ppo.py.
+독립된 알고리즘이 아니다: `attach_action_prior()`가 이미 만들어진 `rsl_rl.algorithms.ppo.PPO`
+인스턴스를 제자리에서(in place) 이 서브클래스로 업그레이드한다 — kl_regularized_ppo.py와
+같은 패턴이다.
 """
 
 import torch
@@ -23,18 +23,18 @@ from rsl_rl.algorithms.ppo import PPO
 
 
 class ActionPriorPPO(PPO):
-    """`rsl_rl` PPO with an added, linearly-decaying `coef(t) * MSE(mu, prior_action)` term.
+    """`rsl_rl`의 PPO에 선형으로 감쇠하는 `coef(t) * MSE(mu, prior_action)` 항을 더한 버전.
 
-    `prior_action` is the raw action that would make `JointPositionAction` (use_default_offset)
-    reproduce the reference motion's target joint pose exactly: since
-    `processed_action = raw_action * scale + default_joint_pos`, inverting gives
-    `prior_action = (ref_joint_pos - default_joint_pos) / scale`. The reference joint pose is read
-    directly out of the policy observation batch's `command` term (its first 29 entries -- see
-    MotionCommand.command / tracking_env_cfg.py's ObservationsCfg -- `command =
-    cat([ref_joint_pos(29), ref_joint_vel(29)])`), so no extra data plumbing is needed.
+    `prior_action`은 `JointPositionAction`(use_default_offset)이 참조 동작의 목표 관절 자세를
+    정확히 재현하게 만드는 raw action이다: `processed_action = raw_action * scale +
+    default_joint_pos`라는 정방향 공식을 역산하면 `prior_action = (ref_joint_pos -
+    default_joint_pos) / scale`이 나온다. 참조 관절 자세는 정책 관측 배치의 `command` 항목
+    앞 29개 값에서 바로 읽어오므로(MotionCommand.command / tracking_env_cfg.py의
+    ObservationsCfg 참고 — `command = cat([ref_joint_pos(29), ref_joint_vel(29)])`), 별도의
+    데이터 배선이 필요 없다.
 
-    Never constructed directly -- `attach_action_prior()` reassigns an existing `PPO` instance's
-    `__class__` to this subclass.
+    직접 생성하지 않는다 — `attach_action_prior()`가 이미 존재하는 `PPO` 인스턴스의
+    `__class__`를 이 서브클래스로 바꿔치기한다.
     """
 
     def set_action_prior(
@@ -47,9 +47,9 @@ class ActionPriorPPO(PPO):
         self._prior_iteration = 0
 
     def update(self):  # noqa: C901
-        # Forked from rsl_rl.algorithms.ppo.PPO.update() (rsl_rl 2.x), same base as
-        # kl_regularized_ppo.py's KLRegularizedPPO -- everything except the "APEX" block below is
-        # an unmodified copy. Keep in sync with upstream if rsl_rl is upgraded.
+        # rsl_rl.algorithms.ppo.PPO.update()(rsl_rl 2.x)를 그대로 복사해 포크한 것 —
+        # kl_regularized_ppo.py의 KLRegularizedPPO와 같은 기반이다. 아래 "APEX" 블록을 제외한
+        # 나머지는 원본과 동일하니, rsl_rl이 업그레이드되면 이 부분도 같이 맞춰줘야 한다.
         prior_coef = self.prior_coef0 * max(0.0, 1.0 - self._prior_iteration / self.decay_iterations)
 
         mean_value_loss = 0
@@ -157,13 +157,13 @@ class ActionPriorPPO(PPO):
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
-            # --- APEX (N3): decaying demonstration-action-prior MSE toward the reference pose ---
-            # `command` is the first observation term (see tracking_env_cfg.py); its first 29
-            # entries are the reference motion's joint_pos for this step (commands.py's
-            # MotionCommand.command property). Invert JointPositionAction's
-            # `processed = raw*scale + default_joint_pos` to get the raw action that would
-            # reproduce it exactly, and pull the policy's mean action toward it with a coefficient
-            # that linearly decays to 0 by `decay_iterations` -- pure RL at convergence.
+            # --- APEX (N3): 참조 자세 쪽으로 당기는, 감쇠하는 시연-행동-사전분포 MSE 항 ---
+            # `command`는 첫 번째 관측 항목이고(tracking_env_cfg.py 참고), 그 앞 29개 값이
+            # 이번 스텝 참조 동작의 joint_pos다(commands.py의 MotionCommand.command 프로퍼티).
+            # JointPositionAction의 `processed = raw*scale + default_joint_pos` 공식을 역산해
+            # 그 자세를 정확히 재현하는 raw action을 구하고, 정책의 평균 행동을 그 쪽으로
+            # 끌어당긴다 — 끌어당기는 세기(계수)는 `decay_iterations`까지 선형으로 0에
+            # 수렴하므로, 수렴 시점에는 순수 RL이 된다.
             if prior_coef > 0:
                 ref_joint_pos = obs_batch[:original_batch_size, :29]
                 prior_action = (ref_joint_pos - self.default_joint_pos) / self.action_scale
@@ -251,10 +251,11 @@ class ActionPriorPPO(PPO):
 
 
 def attach_action_prior(env, runner, prior_coef0: float, decay_iterations: int) -> None:
-    """Upgrade `runner.alg` (a plain rsl_rl `PPO`) to `ActionPriorPPO` in place.
+    """`runner.alg`(일반 rsl_rl `PPO`)를 제자리에서(in place) `ActionPriorPPO`로 업그레이드한다.
 
-    `env` is the (possibly RslRlVecEnvWrapper-wrapped) training env; `.unwrapped` is used to reach
-    `scene`/`action_manager`, same pattern as utils/exporter.py's ONNX metadata export.
+    `env`는 (RslRlVecEnvWrapper로 감싸져 있을 수 있는) 학습용 환경이다; `scene`/`action_manager`에
+    접근하기 위해 `.unwrapped`를 쓰는데, utils/exporter.py가 ONNX 메타데이터를 내보낼 때와
+    같은 패턴이다.
     """
     alg = runner.alg
     alg.__class__ = ActionPriorPPO
@@ -265,6 +266,6 @@ def attach_action_prior(env, runner, prior_coef0: float, decay_iterations: int) 
 
     alg.set_action_prior(default_joint_pos, action_scale, prior_coef0, decay_iterations)
     print(
-        f"[INFO] N3 action prior enabled (APEX-style decaying demonstration prior): "
+        f"[INFO] N3 행동 사전분포 활성화(APEX 스타일 감쇠하는 시연 사전분포): "
         f"coef0={prior_coef0}, decay_iterations={decay_iterations}"
     )

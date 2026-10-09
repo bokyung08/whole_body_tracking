@@ -128,8 +128,8 @@ class MotionCommand(CommandTerm):
         self.clip_failed_count = torch.zeros(self.motion.num_clips, dtype=torch.float, device=self.device)
         self._current_clip_failed = torch.zeros(self.motion.num_clips, dtype=torch.float, device=self.device)
 
-        # N1 (opt-in, cfg.segment_adaptive_sampling): per-clip version of the time-bin EMA
-        # failure sampler above, see _segment_adaptive_clip_sampling().
+        # N1 (opt-in, cfg.segment_adaptive_sampling): 위 시간빈(time-bin) EMA 실패 샘플러를
+        # 클립별로 독립적으로 복제한 버전. 자세한 내용은 _segment_adaptive_clip_sampling() 참고.
         self.segment_failed_count = torch.zeros(
             self.motion.num_clips, self.cfg.segment_bins, dtype=torch.float, device=self.device
         )
@@ -343,14 +343,14 @@ class MotionCommand(CommandTerm):
         self.metrics["sampling_top1_bin"][:] = imax.float() / self.motion.num_clips
 
     def _segment_adaptive_clip_sampling(self, env_ids: Sequence[int]):
-        """N1 (Stubborn-style, arXiv:2606.12814): clip *choice* stays uniform (see
-        _uniform_clip_sampling) -- unlike D2, no clip can ever claim more than its 1/num_clips
-        share of the batch, no matter how often it fails. Only *where inside* the chosen clip to
-        start is biased, toward that clip's own recently-failing segment (an EMA'd failure-rate
-        histogram over cfg.segment_bins cells, tracked separately per clip). This is the direct
-        fix for D2's failure mode (docs/진행상황_연구노트.md 2026-09-27): D2 reweighted whole
-        clips by failure rate, so a single physically-infeasible clip's probability saturated
-        (80-93% in testing) and starved every other clip of practice time."""
+        """N1 (Stubborn 스타일, arXiv:2606.12814): 클립을 "고르는" 것 자체는 균등(uniform)하게
+        유지한다(_uniform_clip_sampling 참고) — D2와 달리, 어떤 클립이 아무리 자주 실패해도
+        전체 배치에서 그 클립이 차지하는 몫은 절대 1/num_clips를 넘을 수 없다. 대신 "고른 클립
+        안에서 어디부터 시작할지"만, 그 클립 자신의 최근 실패 세그먼트 쪽으로 편향시킨다
+        (cfg.segment_bins개 구간에 대한 EMA 실패율 히스토그램을 클립마다 따로 추적). 이는
+        D2의 실패 원인(docs/진행상황_연구노트.md 2026-09-27)을 정면으로 겨냥한 수정이다: D2는
+        클립 전체를 실패율로 재가중했기 때문에, 물리적으로 불가능한 클립 하나의 확률이
+        포화되어(테스트에서 80~93%) 다른 모든 클립의 연습 기회를 빼앗았다."""
         episode_failed = self._env.termination_manager.terminated[env_ids]
         if torch.any(episode_failed):
             old_motion_ids = self.motion_ids[env_ids][episode_failed]
@@ -365,11 +365,12 @@ class MotionCommand(CommandTerm):
                 flat_idx, minlength=self.motion.num_clips * self.cfg.segment_bins
             ).view(self.motion.num_clips, self.cfg.segment_bins).float()
 
-        # Uniform clip choice -- this (not the segment bias below) is what fixes D2's failure mode.
+        # 클립은 균등하게 고른다 — 아래의 세그먼트 편향이 아니라 바로 "이 균등 선택"이 D2의
+        # 실패 원인을 고치는 핵심이다.
         self.motion_ids[env_ids] = torch.randint(0, self.motion.num_clips, (len(env_ids),), device=self.device)
         clip_lens = self.motion.clip_len[self.motion_ids[env_ids]]
 
-        # Within the chosen clip, bias the start segment toward its own recent failures.
+        # 고른 클립 "안에서는" 시작 세그먼트를 그 클립 자신의 최근 실패 이력 쪽으로 편향시킨다.
         probs = self.segment_failed_count[self.motion_ids[env_ids]] + self.cfg.adaptive_uniform_ratio / float(
             self.cfg.segment_bins
         )
@@ -381,8 +382,9 @@ class MotionCommand(CommandTerm):
             * (clip_lens - 1).clamp(min=0)
         ).long()
 
-        # Metrics (reused names): per-env value for the chosen clip's own segment distribution --
-        # a per-env-batched analogue of _adaptive_sampling's single global entropy/top1_prob/top1_bin.
+        # 지표(기존 이름 재사용): 이번에 고른 클립 자신의 세그먼트 분포에 대한 env별 값 —
+        # _adaptive_sampling이 전역 하나로 구했던 entropy/top1_prob/top1_bin을 env 배치별로
+        # 구한 버전이라고 보면 된다.
         H = -(probs * (probs + 1e-12).log()).sum(dim=-1) / math.log(self.cfg.segment_bins)
         pmax, imax = probs.max(dim=-1)
         self.metrics["sampling_entropy"][env_ids] = H
@@ -553,22 +555,22 @@ class MotionCommandCfg(CommandTermCfg):
     to their recent EMA'd failure rate instead of uniformly. See MotionCommand._adaptive_clip_sampling."""
 
     segment_adaptive_sampling: bool = False
-    """N1 (opt-in, off by default; Stubborn-style, arXiv:2606.12814): with multiple clips, keep
-    clip *selection* uniform (unlike D2) but, within whichever clip is picked, bias the start
-    frame toward that clip's own recently-failing segment instead of sampling it uniformly. This
-    targets D2's actual failure mode directly: D2 reweights whole clips by failure rate, so a
-    single physically-infeasible clip's probability saturates and swallows most of the sampling
-    budget (docs/진행상황_연구노트.md 2026-09-27). Biasing only *where inside* a clip to start,
-    while leaving *which* clip gets picked uniform, means an unsolvable clip can never claim more
-    than its 1/num_clips share -- it just wastes that share on itself instead of starving the
-    other clips. See MotionCommand._segment_adaptive_clip_sampling. Mutually exclusive with
-    adaptive_clip_sampling (D2); if both are set, D2 takes precedence (see _resample_command)."""
+    """N1 (opt-in, 기본 꺼짐; Stubborn 스타일, arXiv:2606.12814): 클립이 여러 개일 때, 클립을
+    "고르는" 것 자체는(D2와 달리) 균등하게 유지하되, 일단 고른 클립 "안에서는" 시작 프레임을
+    균등 샘플링 대신 그 클립 자신의 최근 실패 세그먼트 쪽으로 편향시킨다. 이는 D2의 실제 실패
+    원인을 직접 겨냥한다: D2는 클립 전체를 실패율로 재가중하기 때문에, 물리적으로 불가능한
+    클립 하나의 확률이 포화되어 샘플링 예산 대부분을 집어삼킨다(docs/진행상황_연구노트.md
+    2026-09-27). "어느 클립을 고를지"는 균등하게 두고 "그 클립 안 어디서 시작할지"만 편향시키면,
+    풀 수 없는 클립이라도 절대 1/num_clips 몫 이상을 차지할 수 없다 — 그 몫을 자기 안에서
+    낭비할 뿐, 다른 클립들의 몫을 빼앗지는 못한다. 자세한 구현은
+    MotionCommand._segment_adaptive_clip_sampling 참고. adaptive_clip_sampling(D2)과는 동시에
+    켤 수 없는 관계라, 둘 다 설정되면 D2가 우선한다(_resample_command 참고)."""
 
     segment_bins: int = 10
-    """Number of per-clip time segments N1's failure-rate EMA is tracked over (coarser than the
-    single-clip _adaptive_sampling's bin_count, which is sized ~1-per-control-step -- that would
-    be `num_clips * hundreds` of EMA cells here, which is both wasteful and noisier per cell since
-    each clip gets far fewer episodes than the single-clip case did)."""
+    """N1의 실패율 EMA를 추적하는 클립당 시간 구간 수(단일 클립용 _adaptive_sampling의
+    bin_count보다 훨씬 성기다 — 그쪽은 제어 스텝 하나당 구간 하나 정도로 잡는데, 여기서 그렇게
+    하면 `num_clips * 수백` 개의 EMA 칸이 생겨버려 낭비이기도 하고, 클립 하나당 받는 에피소드
+    수가 단일 클립 때보다 훨씬 적어서 칸 하나하나의 값이 더 들쭉날쭉해진다)."""
 
     anchor_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     anchor_visualizer_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)
