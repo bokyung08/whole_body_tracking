@@ -171,12 +171,20 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # Import extensions to set up environment tasks
 import whole_body_tracking.tasks  # noqa: F401
-from whole_body_tracking.tasks.tracking.mdp.adversarial_push import adversarial_push
-from whole_body_tracking.utils.action_prior_ppo import attach_action_prior
 from whole_body_tracking.utils.kl_regularized_ppo import attach_kl_regularization
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
 from whole_body_tracking.utils.r2_curriculum import attach_r2_curriculum
-from whole_body_tracking.utils.symmetry import g1_tracking_mirror_augmentation
+
+# N1~N4 후보(g1_candidates 패키지)는 g1-fullscale-tracking 저장소 소속 코드다 -- 이 fork는
+# humanoid-amass-kit/g1-fullscale-tracking 양쪽이 공유하지만, N1~N4는 g1-fullscale-tracking의
+# LAFAN1-G1/AMASS-standalone 스크리닝 전용이라 가독성을 위해 그쪽 저장소에 두기로 했다(사용자
+# 요청, 2026-10-09). 그래서 공유 코드베이스 쪽에서 import하려면 경로를 직접 추가해야 한다.
+_G1_FULLSCALE_TRACKING_REPO = r"C:\Users\bokyu\Desktop\g1-fullscale-tracking"
+if _G1_FULLSCALE_TRACKING_REPO not in sys.path:
+    sys.path.insert(0, _G1_FULLSCALE_TRACKING_REPO)
+from g1_candidates.action_prior_ppo import attach_action_prior  # noqa: E402
+from g1_candidates.adversarial_push import adversarial_push  # noqa: E402
+from g1_candidates.symmetry import g1_tracking_mirror_augmentation  # noqa: E402
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
