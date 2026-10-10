@@ -77,11 +77,10 @@ parser.add_argument(
     type=float,
     default=0.0,
     help=(
-        "N3 candidate (APEX-style, arXiv:2505.10022): adds coef(t) * MSE(policy_mean_action,"
-        " prior_action) to the PPO loss, where prior_action is the raw action that would exactly"
-        " reproduce the reference motion's target joint pose, and coef(t) linearly decays from"
-        " this value to 0 over --action_prior_decay_iters iterations (pure RL at convergence)."
-        " 0 (default) disables it. See whole_body_tracking/utils/action_prior_ppo.py."
+        "N3 candidate (APEX-style, arXiv:2505.10022): adds a decaying joint-position prior loss"
+        " MSE(policy_mean_action * action_scale + default_joint_pos, reference_joint_pos) to PPO."
+        " coef(t) linearly decays from this value to 0 over --action_prior_decay_iters iterations"
+        " (pure RL at convergence). 0 (default) disables it. See g1_candidates/action_prior_ppo.py."
     ),
 )
 parser.add_argument(
