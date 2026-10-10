@@ -113,6 +113,41 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--r2_sigma_only",
+    action="store_true",
+    default=False,
+    help=(
+        "R2-sigma ablation: same as --r2_curriculum but with the AMT reward-std tightening ONLY (no"
+        " termination-threshold or penalty-weight curriculum). Isolates R2's reward-shaping effect from"
+        " its termination-schedule effect. Mutually exclusive with --r2_curriculum/--r2_theta_only/"
+        " --p_curriculum."
+    ),
+)
+parser.add_argument(
+    "--r2_theta_only",
+    action="store_true",
+    default=False,
+    help=(
+        "R2-theta ablation: same as --r2_curriculum but with the fixed-schedule termination-threshold +"
+        " penalty-weight curricula ONLY (no AMT reward-std tightening). Isolates the mechanism suspected"
+        " (via the R2 fast-clip failure diagnosis) of causing R2's degradation on fast/running clips."
+        " Mutually exclusive with --r2_curriculum/--r2_sigma_only/--p_curriculum."
+    ),
+)
+parser.add_argument(
+    "--p_curriculum",
+    action="store_true",
+    default=False,
+    help=(
+        "P (proposed fix): same as --r2_curriculum but the termination-threshold mechanism is swapped"
+        " from a fixed global-step schedule to one gated on each motion clip's own recent success-rate"
+        " EMA (tightens only while that clip is succeeding often; loosens back off if it starts failing)."
+        " See performance_conditional_termination_threshold_curriculum in"
+        " whole_body_tracking/tasks/tracking/mdp/curriculums.py. Mutually exclusive with"
+        " --r2_curriculum/--r2_sigma_only/--r2_theta_only."
+    ),
+)
+parser.add_argument(
     "--symmetry_loss",
     type=float,
     default=0.0,
@@ -135,6 +170,8 @@ if args_cli.kl_coef > 0 and not args_cli.resume:
     parser.error("--kl_coef > 0 requires --resume True (it regularizes toward the --load_run/--checkpoint being resumed from)")
 if args_cli.kl_coef > 0 and args_cli.action_prior_coef > 0:
     parser.error("--kl_coef and --action_prior_coef both swap runner.alg's __class__ (KLRegularizedPPO vs ActionPriorPPO) and cannot be combined")
+if sum([args_cli.r2_curriculum, args_cli.r2_sigma_only, args_cli.r2_theta_only, args_cli.p_curriculum]) > 1:
+    parser.error("--r2_curriculum/--r2_sigma_only/--r2_theta_only/--p_curriculum are mutually exclusive (each sets env_cfg.curriculum in full)")
 
 # always enable cameras to record video
 if args_cli.video:
@@ -172,7 +209,12 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.kl_regularized_ppo import attach_kl_regularization
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
-from whole_body_tracking.utils.r2_curriculum import attach_r2_curriculum
+from whole_body_tracking.utils.r2_curriculum import (
+    attach_p_curriculum,
+    attach_r2_curriculum,
+    attach_r2_sigma_curriculum,
+    attach_r2_theta_curriculum,
+)
 
 # N1~N4 후보(g1_candidates 패키지)는 g1-fullscale-tracking 저장소 소속 코드다 -- 이 fork는
 # humanoid-amass-kit/g1-fullscale-tracking 양쪽이 공유하지만, N1~N4는 g1-fullscale-tracking의
@@ -239,6 +281,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if args_cli.r2_curriculum:
         attach_r2_curriculum(env_cfg)
+    elif args_cli.r2_sigma_only:
+        attach_r2_sigma_curriculum(env_cfg)
+    elif args_cli.r2_theta_only:
+        attach_r2_theta_curriculum(env_cfg)
+    elif args_cli.p_curriculum:
+        attach_p_curriculum(env_cfg)
 
     if args_cli.adversarial_push:
         env_cfg.events.push_robot.func = adversarial_push
