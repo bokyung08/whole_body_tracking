@@ -183,7 +183,7 @@ _G1_FULLSCALE_TRACKING_REPO = r"C:\Users\bokyu\Desktop\g1-fullscale-tracking"
 if _G1_FULLSCALE_TRACKING_REPO not in sys.path:
     sys.path.insert(0, _G1_FULLSCALE_TRACKING_REPO)
 from g1_candidates.action_prior_ppo import attach_action_prior  # noqa: E402
-from g1_candidates.adversarial_push import adversarial_push  # noqa: E402
+from g1_candidates.adversarial_push import adversarial_push, attach_adversarial_perturber  # noqa: E402
 from g1_candidates.symmetry import g1_tracking_mirror_augmentation  # noqa: E402
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -284,6 +284,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
+
+    if args_cli.adversarial_push:
+        # 롤아웃(inference_mode) 수집이 시작되기 전에 반드시 미리 붙여야 한다 -- 자세한 이유는
+        # g1_candidates/adversarial_push.py의 attach_adversarial_perturber() docstring 참고.
+        attach_adversarial_perturber(env.unwrapped)
 
     # create runner from rsl-rl
     runner = OnPolicyRunner(
