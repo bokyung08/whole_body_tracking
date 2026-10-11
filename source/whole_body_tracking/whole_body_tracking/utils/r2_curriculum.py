@@ -17,7 +17,7 @@ std=0.4, body_pos std=0.3, body_ori std=0.4, body_lin_vel std=1.0, body_ang_vel 
 threshold=0.25, anchor_ori threshold=0.8, ee_body_pos threshold=0.25) so every curriculum below starts
 exactly at today's static values and only moves from there.
 
-R2's three sub-mechanisms (AMT reward-std tightening, termination-threshold tightening, penalty-weight
+R2's three sub-mechanisms (AMT reward-std reduction, termination-threshold reduction, penalty-weight
 growth) can be mixed and matched to isolate which one drives which effect. This is motivated by the
 diagnosed R2 fast-clip failure (진행상황_연구노트.md): R2 improves slower clips but severely degrades fast
 (running/sprinting) clips -- success_rate 0.535 -> 0.157 on those clips specifically, while error_body_pos
@@ -28,11 +28,30 @@ mechanism that directly causes early termination on a fixed, performance-blind s
   attach_r2_sigma_curriculum  R2-sigma (ablation): AMT std ONLY -- isolates the reward-shaping effect.
   attach_r2_theta_curriculum  R2-theta (ablation): fixed-schedule threshold + penalty ONLY, no AMT std --
                                isolates the termination/penalty-schedule effect (the suspected culprit).
-  attach_p_curriculum         P (proposed fix): AMT std + performance-conditional threshold + penalty --
-                               exactly R2 with ONLY the threshold mechanism swapped from a fixed schedule
-                               to one gated on each motion clip's own recent success-rate EMA (see
-                               ``performance_conditional_termination_threshold_curriculum``), so the
-                               comparison against full R2 isolates that one change.
+  attach_p_curriculum         P (draft, NOT YET VALIDATED -- see note below): AMT std + a performance-
+                               conditional threshold mechanism + penalty.
+
+IMPORTANT correction (2026-10-11, after reading the actual papers rather than assuming): KungfuBot
+(arXiv:2506.12851) Appendix C.5 was checked directly -- its termination-threshold curriculum (theta <-
+clip(theta*(1-delta), theta_min, theta_max), delta=2.5e-5 in the paper) and its penalty curriculum are
+BOTH pure step-count schedules with NO performance/success-rate gating whatsoever. So "R2 is KungfuBot's
+own mechanism" is accurate, but citing KungfuBot as grounding for P's performance-conditional IDEA was
+wrong -- KungfuBot is precisely the fixed-schedule design we are trying to improve on, not a precedent for
+conditioning on performance. The two real precedents for that idea are:
+  - Rudin et al. 2021 (CoRL; terrain curriculum in legged_gym's `_update_terrain_curriculum`): promotes to
+    a harder terrain level when distance travelled this one episode > terrain_length/2; demotes when
+    distance < 0.5 * commanded_distance. Single-episode binary decision, no averaging buffer.
+  - OpenAI ADR (arXiv:1910.07113, Appendix C.3 Table 15): per-parameter performance buffer of length
+    m=240 episodes; once full, average performance p_bar is compared against t_L=10/t_H=20 (out of up to
+    50 per-episode successes); expand boundary by delta=0.02 if p_bar>=t_H, shrink if p_bar<=t_L, then
+    clear the buffer. Buffered-average-then-step, not a continuous EMA.
+`performance_conditional_termination_threshold_curriculum`'s current EMA + tighten_above=0.7/
+loosen_below=0.4 implementation below was my own ad-hoc instantiation, not actually derived from either
+paper -- user flagged this (2026-10-11) as insufficiently rigorous. Per-user decision: do NOT finalize or
+run attach_p_curriculum yet. First run attach_r2_theta_curriculum and attach_r2_sigma_curriculum (with the
+30_000-iteration-recalibrated constants below) and look at the results, THEN design P's exact mechanism
+(likely restructured around the ADR buffer-and-step pattern, or found to be unnecessary if the plain decay
+recalibration alone already fixes the fast-clip problem) informed by what those ablations actually show.
 """
 
 from __future__ import annotations
@@ -63,11 +82,17 @@ _AMT_TERMS = [
 ]
 
 # (termination_term_name, init_threshold, min_threshold, decay_per_step) -- reaches min_threshold at
-# roughly step 120_000 of ~192_000 total (8000 iters x 24 steps/iter), i.e. ~60% into training.
+# roughly step 432_000 of ~720_000 total (30_000 iters x 24 steps/iter, the 본실험 budget), i.e. ~60%
+# into training -- same relative KungfuBot-style milestone (arXiv:2506.12851 Appendix C.5 uses the exact
+# formula theta <- clip(theta*(1-decay), theta_min, theta_max)) as the project's earlier screening runs,
+# just recalibrated for 30_000 iterations instead of the 8_000 this constant was originally derived for.
+# 2026-10-11 재보정: 기존 상수(4.25e-6/3.92e-6)는 8,000 iteration(192,000 step) 기준으로 계산된 값이라, 그걸
+# 그대로 30,000 iteration에 쓰면 전체의 ~17%(iteration 5,000)에서 이미 바닥에 도달하고 나머지 83%는 그대로
+# 고정돼버림(의도한 "60% 지점까지 서서히" 와 다름) -- decay_per_step = -ln(min/init) / 432_000 로 재계산.
 _TERMINATION_TERMS = [
-    ("anchor_pos", 0.25, 0.15, 4.25e-6),
-    ("anchor_ori", 0.8, 0.5, 3.92e-6),
-    ("ee_body_pos", 0.25, 0.15, 4.25e-6),
+    ("anchor_pos", 0.25, 0.15, 1.1824e-6),
+    ("anchor_ori", 0.8, 0.5, 1.0880e-6),
+    ("ee_body_pos", 0.25, 0.15, 1.1824e-6),
 ]
 
 # Same (term_name, init_value, min_value) as above, but the 4th element is now a per-step-size for the
@@ -79,14 +104,15 @@ _P_TERMINATION_TERMS = [
     ("ee_body_pos", 0.25, 0.15, 5e-5),
 ]
 
-# (reward_term_name, base_weight) -- alpha ramps 0.1x -> 1.0x by ~step 120_000.
+# (reward_term_name, base_weight) -- alpha ramps 0.1x -> 1.0x by ~step 432_000 (same 30_000-iteration
+# recalibration as _TERMINATION_TERMS above; the old 1.921e-5 was derived for an 8_000-iteration budget).
 _PENALTY_TERMS = [
     ("action_rate_l2", -1e-1),
     ("joint_limit", -10.0),
     ("undesired_contacts", -0.1),
 ]
 
-_GROWTH_PER_STEP = 1.921e-5
+_GROWTH_PER_STEP = 5.3305e-6
 
 
 @configclass
