@@ -113,6 +113,11 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--tracking_diagnostics",
+    action="store_true",
+    help="Record per-clip episode diagnostics and curriculum checkpoint state (automatic for R2).",
+)
+parser.add_argument(
     "--r2_sigma_only",
     action="store_true",
     default=False,
@@ -209,6 +214,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.kl_regularized_ppo import attach_kl_regularization
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
+from whole_body_tracking.utils.training_state import TrackingTrainingState
 from whole_body_tracking.utils.r2_curriculum import (
     attach_p_curriculum,
     attach_r2_curriculum,
@@ -331,6 +337,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
+
+    tracking_mode = (
+        "r2" if args_cli.r2_curriculum else
+        "r2_sigma" if args_cli.r2_sigma_only else
+        "r2_theta" if args_cli.r2_theta_only else None
+    )
+    if tracking_mode is not None or args_cli.tracking_diagnostics:
+        if args_cli.p_curriculum:
+            raise ValueError("The draft P curriculum is deferred; redesign it before enabling diagnostics")
+        TrackingTrainingState(env.unwrapped, tracking_mode or "baseline", log_dir).attach()
 
     if args_cli.adversarial_push:
         # 롤아웃(inference_mode) 수집이 시작되기 전에 반드시 미리 붙여야 한다 -- 자세한 이유는

@@ -22,8 +22,8 @@ flag is set; the A/B/C/R1/D1 conditions leave ``CurriculumCfg`` empty as before 
    of a regularization reward term's base weight (joint_limit / action_rate_l2 / undesired_contacts),
    so penalties bite harder only once the policy has something to lose.
 
-Both (2) and (3) are step functions of ``env.common_step_counter`` (deterministic, resume-safe within a
-single training phase) evaluated in closed form -- no persistent state needed. (1) needs an EMA, which is
+Both (2) and (3) are functions of ``env.common_step_counter`` evaluated in closed form. Resuming requires
+restoring that counter; ``utils.training_state`` checkpoints it together with reward settings. (1) needs an EMA, which is
 stashed on the env object itself (``env._amt_ema``) since curriculum terms are plain functions with no
 instance state of their own.
 
@@ -55,8 +55,8 @@ def adapt_tracking_std(
     """KungfuBot-style adaptive tracking factor: sigma <- min(sigma, EMA(instantaneous error)).
 
     Called at env reset (env_ids = the environments that just terminated), so ``metric_name`` is read
-    from ``MotionCommand.metrics`` before those buffers get overwritten by the reset -- i.e. it reflects
-    the tracking error accumulated over the episode that just ended.
+    from ``MotionCommand.metrics`` before those buffers get overwritten by the reset. It is the most
+    recent error snapshot of the terminating environments, not an episode-average error.
 
     Args:
         term_name: Name of the reward term in ``RewardsCfg`` whose ``params["std"]`` gets updated.
@@ -66,6 +66,9 @@ def adapt_tracking_std(
     """
     command = env.command_manager.get_term("motion")
     term_cfg = env.reward_manager.get_term_cfg(term_name)
+    # Initial resets and the first resumed step can precede the first real metrics update.
+    if env.common_step_counter == 0 or not command._tracking_metrics_ready:
+        return term_cfg.params["std"]
     # error_body_lin_vel/error_body_ang_vel aren't pre-allocated in MotionCommand.__init__ (only
     # error_anchor_*/error_body_pos/error_body_rot/error_joint_* are) -- they get added lazily on the
     # first metrics update, which happens AFTER the very first env.reset() that creates this curriculum
@@ -76,6 +79,8 @@ def adapt_tracking_std(
         return term_cfg.params["std"]
     error = metric[env_ids]
     if error.numel() == 0:
+        return term_cfg.params["std"]
+    if not torch.isfinite(error).all():
         return term_cfg.params["std"]
     batch_mean = error.mean().item()
 

@@ -33,7 +33,13 @@ class MotionOnPolicyRunner(OnPolicyRunner):
 
     def save(self, path: str, infos=None):
         """Save the model and training information."""
+        tracking_state = getattr(self.env.unwrapped, "_tracking_training_state", None)
+        if tracking_state is not None:
+            infos = dict(infos or {})
+            infos["tracking_training_state"] = tracking_state.capture()
         super().save(path, infos)
+        if tracking_state is not None:
+            tracking_state.write_snapshot(self.current_learning_iteration)
         if self.logger_type in ["wandb"]:
             policy_path = path.split("model")[0]
             # see MyOnPolicyRunner.save() above for why this isn't `.split("/")[-2]`
@@ -48,3 +54,10 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             if self.registry_name is not None:
                 wandb.run.use_artifact(self.registry_name)
                 self.registry_name = None
+
+    def load(self, path: str, load_optimizer: bool = True):
+        infos = super().load(path, load_optimizer=load_optimizer)
+        tracking_state = getattr(self.env.unwrapped, "_tracking_training_state", None)
+        if tracking_state is not None:
+            tracking_state.restore(infos)
+        return infos

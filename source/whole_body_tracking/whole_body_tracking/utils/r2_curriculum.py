@@ -21,8 +21,11 @@ R2's three sub-mechanisms (AMT reward-std reduction, termination-threshold reduc
 growth) can be mixed and matched to isolate which one drives which effect. This is motivated by the
 diagnosed R2 fast-clip failure (진행상황_연구노트.md): R2 improves slower clips but severely degrades fast
 (running/sprinting) clips -- success_rate 0.535 -> 0.157 on those clips specifically, while error_body_pos
-on them actually worsens. The termination-threshold curriculum is the prime suspect, since it's the one
-mechanism that directly causes early termination on a fixed, performance-blind schedule.
+on them actually worsens. Two competing explanations must be tested: the fixed termination/penalty
+schedule and the initial reward-std collapse. TensorBoard records show the old screening run used
+position std=0.045 and orientation std=0.06 from iteration 0 throughout; it did not test adaptive
+position/orientation stds as intended. The startup-reset bug is now fixed, so R2-sigma is a corrected
+adaptive condition, NOT an exact reproduction of the screening run's sigma component.
 
   attach_r2_curriculum        R2 (full): AMT std + fixed-schedule threshold + penalty.
   attach_r2_sigma_curriculum  R2-sigma (ablation): AMT std ONLY -- isolates the reward-shaping effect.
@@ -50,8 +53,9 @@ loosen_below=0.4 implementation below was my own ad-hoc instantiation, not actua
 paper -- user flagged this (2026-10-11) as insufficiently rigorous. Per-user decision: do NOT finalize or
 run attach_p_curriculum yet. First run attach_r2_theta_curriculum and attach_r2_sigma_curriculum (with the
 30_000-iteration-recalibrated constants below) and look at the results, THEN design P's exact mechanism
-(likely restructured around the ADR buffer-and-step pattern, or found to be unnecessary if the plain decay
-recalibration alone already fixes the fast-clip problem) informed by what those ablations actually show.
+(likely restructured around the ADR buffer-and-step pattern) informed by those ablations AND a full
+corrected R2 run. Neither single-component results nor a change relative to the old screening budget
+establish that decay recalibration alone fixes the fast-clip problem.
 """
 
 from __future__ import annotations
