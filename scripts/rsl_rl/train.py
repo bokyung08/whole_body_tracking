@@ -24,6 +24,8 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--p_joint_config", type=str, default=None, help="P joint-feedback v1 JSON config (not the old P draft).")
+parser.add_argument("--p_joint_reference", type=str, default=None, help="Frozen D1 reference collected under training noise/push.")
 parser.add_argument(
     "--registry_name", type=str, default=None, help="The name of the wandb registry (single motion; smoke test)."
 )
@@ -177,6 +179,14 @@ if args_cli.kl_coef > 0 and args_cli.action_prior_coef > 0:
     parser.error("--kl_coef and --action_prior_coef both swap runner.alg's __class__ (KLRegularizedPPO vs ActionPriorPPO) and cannot be combined")
 if sum([args_cli.r2_curriculum, args_cli.r2_sigma_only, args_cli.r2_theta_only, args_cli.p_curriculum]) > 1:
     parser.error("--r2_curriculum/--r2_sigma_only/--r2_theta_only/--p_curriculum are mutually exclusive (each sets env_cfg.curriculum in full)")
+if bool(args_cli.p_joint_config) != bool(args_cli.p_joint_reference):
+    parser.error("P joint v1 requires both --p_joint_config and --p_joint_reference")
+if args_cli.p_joint_config and (any([args_cli.r2_curriculum, args_cli.r2_sigma_only, args_cli.r2_theta_only,
+                                  args_cli.p_curriculum, args_cli.tracking_diagnostics,
+                                  args_cli.adaptive_clip_sampling, args_cli.segment_adaptive_sampling,
+                                  args_cli.adversarial_push]) or args_cli.symmetry_loss > 0
+                                  or args_cli.action_prior_coef > 0 or args_cli.kl_coef > 0):
+    parser.error("P joint v1 must run separately from R2/draft-P/N1-N4/KL/other diagnostics")
 
 # always enable cameras to record video
 if args_cli.video:
@@ -294,6 +304,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif args_cli.p_curriculum:
         attach_p_curriculum(env_cfg)
 
+    p_joint_config = None
+    if args_cli.p_joint_config:
+        from g1_candidates.p_joint_core import load_config
+        from g1_candidates.p_joint_runtime import configure as configure_p_joint
+        p_joint_config = load_config(args_cli.p_joint_config)
+        if p_joint_config.seed != agent_cfg.seed:
+            raise ValueError("P config seed differs from the training seed")
+        configure_p_joint(env_cfg, p_joint_config)
+
     if args_cli.adversarial_push:
         env_cfg.events.push_robot.func = adversarial_push
         print("[INFO] N4 adversarial push enabled (learned selective perturber replaces static random push)")
@@ -338,6 +357,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
 
+    p_joint_state = None
+    if p_joint_config is not None:
+        from g1_candidates.p_joint_core import digest
+        from g1_candidates.p_joint_runtime import PJointState, read_reference
+        reference = read_reference(args_cli.p_joint_reference, env_cfg.commands.motion.motion_file)
+        p_joint_state = PJointState(env.unwrapped, p_joint_config, reference,
+                                   digest(args_cli.p_joint_reference), log_dir).attach()
+
     tracking_mode = (
         "r2" if args_cli.r2_curriculum else
         "r2_sigma" if args_cli.r2_sigma_only else
@@ -357,6 +384,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner = OnPolicyRunner(
         env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device, registry_name=registry_name
     )
+    if p_joint_state is not None:
+        p_joint_state.attach_runner(runner)
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
 
@@ -370,6 +399,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
+        if p_joint_state is not None:
+            # RSL stores the last zero-based iteration; P stores the completed update count.
+            runner.current_learning_iteration = p_joint_state.updates
         # optionally regularize fine-tuning toward this same checkpoint (RL's Razor-style
         # KL penalty, see whole_body_tracking/utils/kl_regularized_ppo.py)
         if args_cli.kl_coef > 0:

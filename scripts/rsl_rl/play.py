@@ -20,6 +20,7 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--motion_file", type=str, default=None, help="Path to the motion file.")
+parser.add_argument("--p_joint_eval", action="store_true", help="Load a P joint v1 critic with unchanged official evaluation settings.")
 parser.add_argument(
     "--clean_vis", action="store_true", default=False,
     help="Hide the per-body reference markers (keep only the anchor/root marker) for a less "
@@ -129,6 +130,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if args_cli.clean_vis:
         env_cfg.commands.motion.show_body_markers = False
+
+    if args_cli.p_joint_eval:
+        sys.path.insert(0, r"C:\Users\bokyu\Desktop\g1-fullscale-tracking")
+        from g1_candidates.p_joint_runtime import configure as configure_p_joint
+        configure_p_joint(env_cfg, evaluation=True)
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
